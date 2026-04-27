@@ -33,6 +33,7 @@ CARGOS_PERMISSAO_IDS = [
 ]
 
 NOME_FACCAO = "Croácia"
+TAG_MEMBRO = "Mᴇᴍʙʀᴏ •"
 RADIO_FAC = "173"
 LOCAL_AREA_RISCO = "Número 4"
 COR_PADRAO = discord.Color.dark_red()
@@ -115,6 +116,29 @@ async def enviar_log(guild: discord.Guild, titulo: str, descricao: str, cor=disc
     if canal:
         embed = embed_base(titulo, descricao, cor)
         await canal.send(embed=embed)
+
+
+def montar_apelido_membro(nome: str) -> str:
+    nome_limpo = nome.strip()
+    apelido = f"{TAG_MEMBRO} {nome_limpo}"
+
+    # Limite do Discord para apelidos.
+    if len(apelido) > 32:
+        apelido = apelido[:32]
+
+    return apelido
+
+
+async def aplicar_apelido_membro(membro: discord.Member, nome: str, motivo: str):
+    novo_apelido = montar_apelido_membro(nome)
+
+    try:
+        await membro.edit(nick=novo_apelido, reason=motivo)
+        return True, novo_apelido, None
+    except discord.Forbidden:
+        return False, novo_apelido, "Sem permissão para alterar apelido. O cargo do bot precisa estar acima do membro e ele precisa da permissão Gerenciar Apelidos."
+    except discord.HTTPException:
+        return False, novo_apelido, "Erro do Discord ao alterar apelido."
 
 
 # =========================
@@ -683,6 +707,12 @@ class RecrutamentoModal(discord.ui.Modal, title="Recrutamento Croácia"):
                 )
                 return
 
+            apelido_alterado, novo_apelido, erro_apelido = await aplicar_apelido_membro(
+                interaction.user,
+                self.personagem.value,
+                "Apelido alterado após recrutamento"
+            )
+
             uid = str(interaction.user.id)
 
             # Garante que todas as áreas existam no dados.json.
@@ -697,7 +727,8 @@ class RecrutamentoModal(discord.ui.Modal, title="Recrutamento Croácia"):
             # Salva o membro no sistema principal.
             data["registros"][uid] = {
                 "nome": self.personagem.value,
-                "cargo": "Membros"
+                "cargo": "Membros",
+                "apelido": novo_apelido
             }
 
             # Salva o formulário completo do recrutamento.
@@ -708,7 +739,9 @@ class RecrutamentoModal(discord.ui.Modal, title="Recrutamento Croácia"):
                 "personagem": self.personagem.value,
                 "idade": self.idade.value,
                 "motivo": self.motivo.value,
-                "cargo_recebido": "Membros"
+                "cargo_recebido": "Membros",
+                "apelido_definido": novo_apelido,
+                "apelido_alterado": apelido_alterado
             }
 
             # Garante campos iniciais.
@@ -729,6 +762,14 @@ class RecrutamentoModal(discord.ui.Modal, title="Recrutamento Croácia"):
             embed.add_field(name="Idade", value=self.idade.value, inline=True)
             embed.add_field(name="Motivo", value=self.motivo.value, inline=False)
             embed.add_field(name="Cargo aplicado", value=cargo_membros.mention, inline=False)
+            embed.add_field(name="Apelido definido", value=novo_apelido, inline=False)
+
+            if not apelido_alterado:
+                embed.add_field(
+                    name="Aviso",
+                    value=erro_apelido or "Não consegui alterar o apelido.",
+                    inline=False
+                )
 
             canal = interaction.guild.get_channel(RECRUTAMENTO_CHANNEL_ID)
             if canal:
@@ -740,14 +781,20 @@ class RecrutamentoModal(discord.ui.Modal, title="Recrutamento Croácia"):
                 f"**Membro:** {interaction.user.mention}\n"
                 f"**Cargo aplicado:** {cargo_membros.mention}\n"
                 f"**Personagem:** {self.personagem.value}\n"
+                f"**Apelido:** {novo_apelido}\n"
+                f"**Apelido alterado:** {'Sim' if apelido_alterado else 'Não'}\n"
                 f"**Formulário:** salvo em dados.json",
                 discord.Color.green()
             )
 
-            await interaction.followup.send(
-                f"✅ Recrutamento enviado e salvo! Você recebeu o cargo {cargo_membros.mention}.",
-                ephemeral=True
-            )
+            resposta = f"✅ Recrutamento enviado e salvo! Você recebeu o cargo {cargo_membros.mention}."
+
+            if apelido_alterado:
+                resposta += f"\n✅ Seu apelido foi alterado para: **{novo_apelido}**"
+            else:
+                resposta += f"\n⚠️ Não consegui alterar seu apelido: {erro_apelido}"
+
+            await interaction.followup.send(resposta, ephemeral=True)
 
         except Exception as erro:
             print(f"ERRO NO RECRUTAMENTO: {repr(erro)}")
@@ -755,6 +802,7 @@ class RecrutamentoModal(discord.ui.Modal, title="Recrutamento Croácia"):
                 "❌ Ocorreu um erro ao concluir o recrutamento. Avise a liderança e veja o erro no terminal.",
                 ephemeral=True
             )
+
 
 class RecrutamentoView(discord.ui.View):
     def __init__(self):
@@ -813,6 +861,87 @@ async def verrecrutamento(interaction: discord.Interaction, membro: discord.Memb
 
     await interaction.response.send_message(embed=embed)
 
+
+
+# =========================
+# SISTEMA DE NOMES / TAGS
+# =========================
+
+@bot.tree.command(name="renomear", description="Aplica a tag Membro no apelido de um membro")
+async def renomear(interaction: discord.Interaction, membro: discord.Member, nome: str):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    sucesso, novo_apelido, erro = await aplicar_apelido_membro(
+        membro,
+        nome,
+        f"Renomeado por {interaction.user}"
+    )
+
+    uid = str(membro.id)
+    data.setdefault("registros", {})
+    if uid not in data["registros"]:
+        data["registros"][uid] = {"nome": nome, "cargo": "Membros", "apelido": novo_apelido}
+    else:
+        data["registros"][uid]["nome"] = nome
+        data["registros"][uid]["apelido"] = novo_apelido
+
+    salvar()
+
+    if not sucesso:
+        await interaction.response.send_message(f"❌ Não consegui alterar o apelido: {erro}", ephemeral=True)
+        return
+
+    await enviar_log(
+        interaction.guild,
+        "🏷️ Apelido alterado",
+        f"**Membro:** {membro.mention}\n**Novo apelido:** {novo_apelido}\n**Por:** {interaction.user.mention}",
+        discord.Color.green()
+    )
+
+    embed = embed_base("🏷️ Apelido atualizado", color=discord.Color.green())
+    embed.add_field(name="Membro", value=membro.mention, inline=False)
+    embed.add_field(name="Novo apelido", value=novo_apelido, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="arrumarnome", description="Aplica a tag Membro usando o nome já salvo na ficha")
+async def arrumarnome(interaction: discord.Interaction, membro: discord.Member):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    uid = str(membro.id)
+    dados = data.get("registros", {}).get(uid)
+
+    if not dados:
+        await interaction.response.send_message("❌ Esse membro não está registrado no sistema.", ephemeral=True)
+        return
+
+    nome = dados.get("nome", membro.display_name)
+    sucesso, novo_apelido, erro = await aplicar_apelido_membro(
+        membro,
+        nome,
+        f"Nome ajustado por {interaction.user}"
+    )
+
+    dados["apelido"] = novo_apelido
+    salvar()
+
+    if not sucesso:
+        await interaction.response.send_message(f"❌ Não consegui alterar o apelido: {erro}", ephemeral=True)
+        return
+
+    embed = embed_base("✅ Nome ajustado", f"{membro.mention} agora está como **{novo_apelido}**.", discord.Color.green())
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="minhatag", description="Mostra como seu nome ficaria com a tag de membro")
+async def minhatag(interaction: discord.Interaction, nome: str):
+    apelido = montar_apelido_membro(nome)
+    embed = embed_base("🏷️ Prévia da tag", f"Seu apelido ficaria:\n**{apelido}**", discord.Color.gold())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 
