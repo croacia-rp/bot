@@ -41,7 +41,7 @@ LOCAL_AREA_RISCO = "Número 4"
 COR_PADRAO = discord.Color.dark_red()
 
 CHEFES = {
-    "00": {"nome": "Conor", "funcao": "Líder geral da facção, toma decisões e comanda operações."},
+    "00": {"nome": "Connor", "funcao": "Líder geral da facção, toma decisões e comanda operações."},
     "01": {"nome": "Lincon", "funcao": "Sub-líder, organiza membros e coordena ações."},
     "02": {"nome": "Mudo", "funcao": "Gerente, controla farm, disciplina e organização da equipe."}
 }
@@ -1284,11 +1284,13 @@ async def verindicacao(interaction: discord.Interaction, membro: discord.Member)
         await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=True)
+
     uid = str(membro.id)
     ficha = data.get("indicacoes", {}).get(uid)
 
     if not ficha:
-        await interaction.response.send_message("❌ Esse membro ainda não registrou indicação.", ephemeral=True)
+        await interaction.followup.send("❌ Esse membro ainda não registrou indicação.", ephemeral=True)
         return
 
     embed = embed_base("🤝 Ficha de Indicação", color=discord.Color.dark_red())
@@ -1296,7 +1298,7 @@ async def verindicacao(interaction: discord.Interaction, membro: discord.Member)
     embed.add_field(name="Indicado por", value=f"<@{ficha.get('indicado_por_id')}>", inline=False)
     embed.add_field(name="Canal", value=f"<#{ficha.get('canal_id')}>", inline=True)
     embed.add_field(name="Data", value=ficha.get("data", "Não informado"), inline=True)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="liberarindicacao", description="Libera novamente o canal de indicação para um membro")
