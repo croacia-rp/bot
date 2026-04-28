@@ -1,8 +1,9 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 # =========================
@@ -16,6 +17,8 @@ GUILD_ID = 1442149654971027488
 LOG_CHANNEL_ID = 1442149655361093745
 RECRUTAMENTO_CHANNEL_ID = 1491457861732274248
 INDICACAO_CHANNEL_ID = 1498645764836954182
+AVISOS_FARM_CHANNEL_ID = 1498662912594804867
+TIMEZONE_BOT = ZoneInfo("America/Sao_Paulo")
 
 CARGO_ADV_ID = 1442149654971027490
 CARGO_MEMBROS_ID = 1442149655340388458
@@ -87,6 +90,8 @@ data.setdefault("indicacoes", {})
 data.setdefault("metas_farm", {"five": 500, "ak47": 500, "outros": 500})
 data.setdefault("farms_semanais", {})
 data.setdefault("historico_farms", [])
+data.setdefault("historico_resets_farm", [])
+data.setdefault("ultimo_reset_farm", None)
 
 
 def salvar():
@@ -126,6 +131,10 @@ async def enviar_log(guild: discord.Guild, titulo: str, descricao: str, cor=disc
         await canal.send(embed=embed)
 
 
+def canal_avisos_farm(guild: discord.Guild):
+    return guild.get_channel(AVISOS_FARM_CHANNEL_ID)
+
+
 def montar_apelido_membro(nome: str) -> str:
     nome_limpo = nome.strip()
     apelido = f"{TAG_MEMBRO} {nome_limpo}"
@@ -161,6 +170,8 @@ async def on_ready():
         synced = await bot.tree.sync(guild=guild)
         print(f"🇭🇷 {NOME_FACCAO} online como {bot.user}")
         print(f"Comandos sincronizados: {len(synced)}")
+        if not reset_farm_automatico.is_running():
+            reset_farm_automatico.start()
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
@@ -314,10 +325,21 @@ METAS_PADRAO = {
 }
 
 
-def semana_atual() -> str:
-    agora = datetime.now()
-    ano, semana, _ = agora.isocalendar()
+def agora_brasil() -> datetime:
+    return datetime.now(TIMEZONE_BOT)
+
+
+def semana_por_data(data_base: datetime) -> str:
+    ano, semana, _ = data_base.isocalendar()
     return f"{ano}-S{semana:02d}"
+
+
+def semana_atual() -> str:
+    return semana_por_data(agora_brasil())
+
+
+def semana_anterior() -> str:
+    return semana_por_data(agora_brasil() - timedelta(days=7))
 
 
 def nome_semana(semana: str | None = None) -> str:
@@ -388,6 +410,189 @@ def bateu_todas_metas(farm: dict) -> bool:
     return all(farm.get(chave, 0) >= metas.get(chave, METAS_PADRAO[chave]) for chave in METAS_PADRAO)
 
 
+
+def membros_registrados_ids() -> list[str]:
+    registros = data.get("registros", {})
+    return [str(uid) for uid in registros.keys()]
+
+
+def resumo_farms_semana(semana: str | None = None):
+    garantir_estrutura_farm()
+    semana = nome_semana(semana)
+    registros = data.get("registros", {})
+    farms_semana = data.get("farms_semanais", {}).get(semana, {})
+
+    aprovados = []
+    pendentes = []
+    total_five = 0
+    total_ak47 = 0
+    total_outros = 0
+
+    for uid, ficha in registros.items():
+        farm_membro = farms_semana.get(uid, {"five": 0, "ak47": 0, "outros": 0})
+        for chave in METAS_PADRAO:
+            farm_membro.setdefault(chave, 0)
+
+        total_five += farm_membro.get("five", 0)
+        total_ak47 += farm_membro.get("ak47", 0)
+        total_outros += farm_membro.get("outros", 0)
+
+        item = {
+            "uid": uid,
+            "nome": ficha.get("nome", f"<@{uid}>"),
+            "farm": farm_membro,
+            "total": sum(farm_membro.values())
+        }
+
+        if bateu_todas_metas(farm_membro):
+            aprovados.append(item)
+        else:
+            pendentes.append(item)
+
+    top = sorted(
+        [
+            {"uid": uid, "farm": farm, "total": sum(farm.values())}
+            for uid, farm in farms_semana.items()
+        ],
+        key=lambda item: item["total"],
+        reverse=True
+    )
+
+    return {
+        "semana": semana,
+        "aprovados": aprovados,
+        "pendentes": pendentes,
+        "top": top,
+        "total_five": total_five,
+        "total_ak47": total_ak47,
+        "total_outros": total_outros,
+        "total_geral": total_five + total_ak47 + total_outros,
+        "total_membros": len(registros)
+    }
+
+
+def lista_resumo_membros(lista: list[dict], limite: int = 20) -> str:
+    if not lista:
+        return "Ninguém nessa lista."
+
+    linhas = []
+    for item in lista[:limite]:
+        farm = item["farm"]
+        linhas.append(
+            f"<@{item['uid']}> • **{item['nome']}**\n"
+            f"FIVE: {farm.get('five', 0)} • AK-47: {farm.get('ak47', 0)} • OUTROS: {farm.get('outros', 0)} • Total: **{item['total']}**"
+        )
+
+    if len(lista) > limite:
+        linhas.append(f"...e mais **{len(lista) - limite}** membro(s).")
+
+    return "\n\n".join(linhas)
+
+
+async def anunciar_reset_farm(guild: discord.Guild, semana: str, automatico: bool = True, autor: discord.Member | None = None):
+    resumo = resumo_farms_semana(semana)
+    canal = canal_avisos_farm(guild)
+
+    if not canal:
+        await enviar_log(
+            guild,
+            "⚠️ Canal de avisos de farm não encontrado",
+            f"Não achei o canal `{AVISOS_FARM_CHANNEL_ID}` para anunciar o reset da semana **{semana}**.",
+            discord.Color.orange()
+        )
+        return resumo
+
+    tipo_reset = "automático" if automatico else f"manual por {autor.mention if autor else 'liderança'}"
+
+    embed_resumo = embed_base(
+        "♻️ Reset semanal de farm realizado",
+        f"A semana **{semana}** foi fechada. O ciclo virou a página, e o livro de munições começou limpo de novo.",
+        discord.Color.dark_gold()
+    )
+    embed_resumo.add_field(name="Tipo de reset", value=tipo_reset, inline=True)
+    embed_resumo.add_field(name="Membros avaliados", value=str(resumo["total_membros"]), inline=True)
+    embed_resumo.add_field(name="Total entregue", value=f"{resumo['total_geral']} munições", inline=True)
+    embed_resumo.add_field(name="FIVE", value=str(resumo["total_five"]), inline=True)
+    embed_resumo.add_field(name="AK-47", value=str(resumo["total_ak47"]), inline=True)
+    embed_resumo.add_field(name="OUTROS", value=str(resumo["total_outros"]), inline=True)
+    embed_resumo.add_field(name="✅ Bateram meta", value=str(len(resumo["aprovados"])), inline=True)
+    embed_resumo.add_field(name="⚠️ Não bateram meta", value=str(len(resumo["pendentes"])), inline=True)
+
+    await canal.send(embed=embed_resumo)
+
+    embed_aprovados = embed_base(
+        "✅ Membros que entregaram a meta semanal",
+        "Esses membros fecharam a semana com a entrega completa. A máquina girou bonito.",
+        discord.Color.green()
+    )
+    embed_aprovados.add_field(name="Lista", value=lista_resumo_membros(resumo["aprovados"]), inline=False)
+    await canal.send(embed=embed_aprovados)
+
+    embed_pendentes = embed_base(
+        "⚠️ Membros que NÃO entregaram a meta semanal",
+        "Esses membros ficaram com farm pendente na semana fechada. Liderança, atenção nessa lista.",
+        discord.Color.red()
+    )
+    embed_pendentes.add_field(name="Lista", value=lista_resumo_membros(resumo["pendentes"]), inline=False)
+    await canal.send(embed=embed_pendentes)
+
+    data.setdefault("historico_resets_farm", [])
+    data["historico_resets_farm"].append({
+        "semana": semana,
+        "data_reset": agora_brasil().strftime("%Y-%m-%d %H:%M:%S"),
+        "automatico": automatico,
+        "autor_id": autor.id if autor else None,
+        "total_membros": resumo["total_membros"],
+        "aprovados": [item["uid"] for item in resumo["aprovados"]],
+        "pendentes": [item["uid"] for item in resumo["pendentes"]],
+        "totais": {
+            "five": resumo["total_five"],
+            "ak47": resumo["total_ak47"],
+            "outros": resumo["total_outros"],
+            "geral": resumo["total_geral"]
+        }
+    })
+
+    data.get("farms_semanais", {}).pop(semana, None)
+    data["ultimo_reset_farm"] = agora_brasil().strftime("%Y-%m-%d")
+    salvar()
+
+    await enviar_log(
+        guild,
+        "♻️ Reset semanal de farm anunciado",
+        f"**Semana fechada:** {semana}\n**Bateram:** {len(resumo['aprovados'])}\n**Pendentes:** {len(resumo['pendentes'])}\n**Canal:** <#{AVISOS_FARM_CHANNEL_ID}>",
+        discord.Color.dark_gold()
+    )
+
+    return resumo
+
+
+@tasks.loop(minutes=30)
+async def reset_farm_automatico():
+    try:
+        agora = agora_brasil()
+
+        # Segunda-feira, primeira hora do dia: fecha a semana anterior.
+        if agora.weekday() != 0 or agora.hour != 0:
+            return
+
+        hoje = agora.strftime("%Y-%m-%d")
+        if data.get("ultimo_reset_farm") == hoje:
+            return
+
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            return
+
+        await anunciar_reset_farm(guild, semana_anterior(), automatico=True)
+
+    except Exception as erro:
+        print(f"ERRO NO RESET AUTOMATICO DE FARM: {repr(erro)}")
+
+
+@reset_farm_automatico.before_loop
+async def antes_reset_farm_automatico():
+    await bot.wait_until_ready()
 @bot.tree.command(name="farm", description="Registra farm semanal de munições para um membro")
 async def farm(interaction: discord.Interaction, membro: discord.Member, municao: str, quantidade: int):
     await interaction.response.defer(ephemeral=True)
@@ -558,7 +763,7 @@ async def setmeta(interaction: discord.Interaction, municao: str, quantidade: in
         print(f"ERRO NO COMANDO /setmeta: {repr(erro)}")
         await interaction.followup.send("❌ Deu erro ao alterar a meta.", ephemeral=True)
 
-@bot.tree.command(name="resetfarmsemana", description="Zera os farms da semana atual. Apenas autorizados")
+@bot.tree.command(name="resetfarmsemana", description="Fecha, anuncia e zera os farms da semana atual. Apenas autorizados")
 async def resetfarmsemana(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
@@ -569,17 +774,16 @@ async def resetfarmsemana(interaction: discord.Interaction):
 
         garantir_estrutura_farm()
         semana = semana_atual()
-        data["farms_semanais"][semana] = {}
-        salvar()
+        resumo = await anunciar_reset_farm(interaction.guild, semana, automatico=False, autor=interaction.user)
 
-        await enviar_log(
-            interaction.guild,
+        embed = embed_base(
             "♻️ Farm semanal resetado",
-            f"**Semana:** {semana}\n**Por:** {interaction.user.mention}",
+            f"A semana **{semana}** foi fechada e o aviso caiu em <#{AVISOS_FARM_CHANNEL_ID}>.",
             discord.Color.orange()
         )
-
-        embed = embed_base("♻️ Farm semanal resetado", f"Os farms da semana **{semana}** foram zerados.", discord.Color.orange())
+        embed.add_field(name="Bateram meta", value=str(len(resumo["aprovados"])), inline=True)
+        embed.add_field(name="Não bateram", value=str(len(resumo["pendentes"])), inline=True)
+        embed.add_field(name="Total entregue", value=f"{resumo['total_geral']} munições", inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     except Exception as erro:
@@ -656,6 +860,85 @@ async def pendentesfarm(interaction: discord.Interaction):
     except Exception as erro:
         print(f"ERRO NO COMANDO /pendentesfarm: {repr(erro)}")
         await interaction.followup.send("❌ Deu erro ao listar pendentes.", ephemeral=True)
+
+@bot.tree.command(name="painel", description="Mostra um painel bonito com o resumo geral da facção")
+async def painel(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+
+    try:
+        garantir_estrutura_farm()
+        semana = semana_atual()
+        resumo = resumo_farms_semana(semana)
+        metas = data.get("metas_farm", METAS_PADRAO)
+        caixa_total = data.get("caixa", 0)
+        registros = data.get("registros", {})
+        indicacoes = data.get("indicacoes", {})
+
+        top_texto = "Ainda sem entregas nessa semana."
+        if resumo["top"]:
+            linhas_top = []
+            for pos, item in enumerate(resumo["top"][:5], start=1):
+                farm = item["farm"]
+                linhas_top.append(
+                    f"**{pos}.** <@{item['uid']}> • **{item['total']}** un. "
+                    f"｜ FIVE {farm.get('five', 0)} • AK-47 {farm.get('ak47', 0)} • OUTROS {farm.get('outros', 0)}"
+                )
+            top_texto = "\n".join(linhas_top)
+
+        porcentagem = 0
+        if resumo["total_membros"] > 0:
+            porcentagem = round((len(resumo["aprovados"]) / resumo["total_membros"]) * 100)
+
+        barra_cheia = max(0, min(10, porcentagem // 10))
+        barra = "🟥" * barra_cheia + "⬛" * (10 - barra_cheia)
+
+        embed = embed_base(
+            "🇭🇷 Painel Geral da Croácia",
+            "**Central de comando da facção**\nResumo vivo de caixa, farms, metas e desempenho semanal.",
+            discord.Color.dark_red()
+        )
+        embed.add_field(name="📆 Semana", value=semana, inline=True)
+        embed.add_field(name="💰 Caixa", value=f"R$ {caixa_total}", inline=True)
+        embed.add_field(name="👥 Membros registrados", value=str(len(registros)), inline=True)
+
+        embed.add_field(
+            name="🎯 Metas semanais",
+            value=(
+                f"**FIVE:** {metas.get('five', 500)}\n"
+                f"**AK-47:** {metas.get('ak47', 500)}\n"
+                f"**OUTROS:** {metas.get('outros', 500)}"
+            ),
+            inline=True
+        )
+        embed.add_field(
+            name="📦 Entregas da semana",
+            value=(
+                f"**FIVE:** {resumo['total_five']}\n"
+                f"**AK-47:** {resumo['total_ak47']}\n"
+                f"**OUTROS:** {resumo['total_outros']}\n"
+                f"**Total:** {resumo['total_geral']}"
+            ),
+            inline=True
+        )
+        embed.add_field(
+            name="📊 Status das metas",
+            value=(
+                f"✅ Bateram: **{len(resumo['aprovados'])}**\n"
+                f"⚠️ Pendentes: **{len(resumo['pendentes'])}**\n"
+                f"🔥 Conclusão: **{porcentagem}%**\n{barra}"
+            ),
+            inline=True
+        )
+        embed.add_field(name="🏆 Top farms da semana", value=top_texto, inline=False)
+        embed.add_field(name="🤝 Indicações registradas", value=str(len(indicacoes)), inline=True)
+        embed.add_field(name="♻️ Reset automático", value=f"Segunda-feira às 00:00\nCanal: <#{AVISOS_FARM_CHANNEL_ID}>", inline=True)
+        embed.add_field(name="🧭 Comandos úteis", value="`/farm` • `/meufarm` • `/farmusuario` • `/metasfarm` • `/pendentesfarm` • `/ranking`", inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as erro:
+        print(f"ERRO NO COMANDO /painel: {repr(erro)}")
+        await interaction.followup.send("❌ Deu erro ao abrir o painel.", ephemeral=True)
 
 @bot.tree.command(name="saldo", description="Mostra seu saldo")
 async def saldo(interaction: discord.Interaction):
