@@ -1,5 +1,6 @@
 import os
 import json
+from datetime import datetime
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -79,6 +80,9 @@ data.setdefault("advertencias", {})
 data.setdefault("blacklist", [])
 data.setdefault("caixa", 0)
 data.setdefault("recrutamentos", {})
+data.setdefault("metas_farm", {"five": 500, "ak47": 500, "outros": 500})
+data.setdefault("farms_semanais", {})
+data.setdefault("historico_farms", [])
 
 
 def salvar():
@@ -212,7 +216,7 @@ async def chefes(interaction: discord.Interaction):
 async def rotas(interaction: discord.Interaction):
     embed = embed_base(
         f"📦 Rotas da {NOME_FACCAO}",
-        "Use `/farm tipo` para registrar uma rota.",
+        "Use `/farm membro munição quantidade` para registrar munições vendidas.",
         discord.Color.dark_red()
     )
     for tipo, descricao in ROTAS.items():
@@ -267,33 +271,318 @@ async def alerta(interaction: discord.Interaction, tipo: str, mensagem: str):
 
 
 # =========================
-# FARM / DINHEIRO / CAIXA
+# FARM SEMANAL / METAS / DINHEIRO / CAIXA
 # =========================
 
-@bot.tree.command(name="farm", description="Registra um farm feito")
-async def farm(interaction: discord.Interaction, tipo: str):
-    tipo = tipo.lower()
-    if tipo not in ROTAS:
-        await interaction.response.send_message("❌ Tipo inválido. Use `sequencial` ou `aleatoria`.", ephemeral=True)
+TIPOS_MUNICAO = {
+    "five": "FIVE",
+    "5": "FIVE",
+    "five-seven": "FIVE",
+    "fiveseven": "FIVE",
+    "ak47": "AK-47",
+    "ak-47": "AK-47",
+    "ak": "AK-47",
+    "outros": "OUTROS",
+    "outro": "OUTROS",
+    "outras": "OUTROS"
+}
+
+METAS_PADRAO = {
+    "five": 500,
+    "ak47": 500,
+    "outros": 500
+}
+
+
+def semana_atual() -> str:
+    agora = datetime.now()
+    ano, semana, _ = agora.isocalendar()
+    return f"{ano}-S{semana:02d}"
+
+
+def nome_semana(semana: str | None = None) -> str:
+    return semana or semana_atual()
+
+
+def normalizar_municao(municao: str):
+    chave = municao.lower().strip().replace("_", "-").replace(" ", "")
+
+    if chave in ["ak47", "ak-47", "ak"]:
+        return "ak47", "AK-47"
+    if chave in ["five", "5", "five-seven", "fiveseven"]:
+        return "five", "FIVE"
+    if chave in ["outros", "outro", "outras"]:
+        return "outros", "OUTROS"
+
+    return None, None
+
+
+def garantir_estrutura_farm():
+    data.setdefault("metas_farm", METAS_PADRAO.copy())
+    data.setdefault("farms_semanais", {})
+    data.setdefault("historico_farms", [])
+
+    for chave, valor in METAS_PADRAO.items():
+        data["metas_farm"].setdefault(chave, valor)
+
+
+def garantir_farm_usuario(uid: str, semana: str | None = None):
+    garantir_estrutura_farm()
+    semana = nome_semana(semana)
+    data["farms_semanais"].setdefault(semana, {})
+    data["farms_semanais"][semana].setdefault(uid, {"five": 0, "ak47": 0, "outros": 0})
+
+    for chave in METAS_PADRAO:
+        data["farms_semanais"][semana][uid].setdefault(chave, 0)
+
+    return data["farms_semanais"][semana][uid]
+
+
+def total_farm_usuario(uid: str, semana: str | None = None) -> int:
+    farm = garantir_farm_usuario(uid, semana)
+    return farm.get("five", 0) + farm.get("ak47", 0) + farm.get("outros", 0)
+
+
+def status_meta(valor: int, meta: int) -> str:
+    if valor >= meta:
+        return "✅ Batida"
+    falta = meta - valor
+    return f"❌ Falta {falta}"
+
+
+def progresso_meta_texto(farm: dict) -> str:
+    metas = data.get("metas_farm", METAS_PADRAO)
+    linhas = []
+    nomes = {"five": "FIVE", "ak47": "AK-47", "outros": "OUTROS"}
+
+    for chave in ["five", "ak47", "outros"]:
+        valor = farm.get(chave, 0)
+        meta = metas.get(chave, METAS_PADRAO[chave])
+        linhas.append(f"**{nomes[chave]}:** {valor}/{meta} • {status_meta(valor, meta)}")
+
+    return "\n".join(linhas)
+
+
+def bateu_todas_metas(farm: dict) -> bool:
+    metas = data.get("metas_farm", METAS_PADRAO)
+    return all(farm.get(chave, 0) >= metas.get(chave, METAS_PADRAO[chave]) for chave in METAS_PADRAO)
+
+
+@bot.tree.command(name="farm", description="Registra farm semanal de munições para um membro")
+async def farm(interaction: discord.Interaction, membro: discord.Member, municao: str, quantidade: int):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         return
 
-    uid = str(interaction.user.id)
-    data["farms"][uid] = data["farms"].get(uid, 0) + 1
-    data["saldos"][uid] = data["saldos"].get(uid, 0) + 1000
-    data["caixa"] = data.get("caixa", 0) + 500
+    if quantidade <= 0:
+        await interaction.response.send_message("❌ Quantidade inválida.", ephemeral=True)
+        return
+
+    chave, nome = normalizar_municao(municao)
+    if not chave:
+        await interaction.response.send_message(
+            "❌ Munição inválida. Use: `five`, `ak47` ou `outros`.",
+            ephemeral=True
+        )
+        return
+
+    semana = semana_atual()
+    uid = str(membro.id)
+    farm_membro = garantir_farm_usuario(uid, semana)
+    farm_membro[chave] += quantidade
+
+    data["farms"][uid] = data["farms"].get(uid, 0) + quantidade
+    data["historico_farms"].append({
+        "semana": semana,
+        "membro_id": membro.id,
+        "membro": str(membro),
+        "municao": chave,
+        "quantidade": quantidade,
+        "registrado_por_id": interaction.user.id,
+        "registrado_por": str(interaction.user),
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
     salvar()
 
     await enviar_log(
         interaction.guild,
-        "📦 Farm registrado",
-        f"**Membro:** {interaction.user.mention}\n**Tipo:** {tipo}\n**Ganho:** R$ 1.000\n**Caixa:** +R$ 500",
+        "📦 Farm semanal registrado",
+        f"**Membro:** {membro.mention}\n"
+        f"**Munição:** {nome}\n"
+        f"**Quantidade:** {quantidade}\n"
+        f"**Semana:** {semana}\n"
+        f"**Registrado por:** {interaction.user.mention}",
         discord.Color.green()
     )
 
-    embed = embed_base("✅ Farm registrado", f"{interaction.user.mention} registrou uma rota **{tipo}**.", discord.Color.green())
-    embed.add_field(name="Ganho do membro", value="R$ 1.000", inline=True)
-    embed.add_field(name="Entrada no caixa", value="R$ 500", inline=True)
-    embed.add_field(name="Total de farms", value=str(data["farms"][uid]), inline=False)
+    embed = embed_base("✅ Farm registrado", f"Farm lançado para {membro.mention}.", discord.Color.green())
+    embed.add_field(name="Semana", value=semana, inline=True)
+    embed.add_field(name="Munição", value=nome, inline=True)
+    embed.add_field(name="Quantidade", value=str(quantidade), inline=True)
+    embed.add_field(name="Progresso semanal", value=progresso_meta_texto(farm_membro), inline=False)
+    embed.add_field(name="Situação geral", value="✅ Todas as metas batidas" if bateu_todas_metas(farm_membro) else "⚠️ Ainda falta bater meta", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="meufarm", description="Mostra seu farm semanal de munições")
+async def meufarm(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    semana = semana_atual()
+    farm_membro = garantir_farm_usuario(uid, semana)
+    salvar()
+
+    embed = embed_base("📦 Meu farm semanal", f"Semana atual: **{semana}**", discord.Color.gold())
+    embed.add_field(name="Membro", value=interaction.user.mention, inline=False)
+    embed.add_field(name="Progresso", value=progresso_meta_texto(farm_membro), inline=False)
+    embed.add_field(name="Total entregue", value=str(total_farm_usuario(uid, semana)), inline=True)
+    embed.add_field(name="Situação", value="✅ Todas as metas batidas" if bateu_todas_metas(farm_membro) else "⚠️ Meta pendente", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="farmusuario", description="Mostra o farm semanal de um membro")
+async def farmusuario(interaction: discord.Interaction, membro: discord.Member):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    uid = str(membro.id)
+    semana = semana_atual()
+    farm_membro = garantir_farm_usuario(uid, semana)
+    salvar()
+
+    embed = embed_base("📦 Farm semanal do membro", f"Semana atual: **{semana}**", discord.Color.dark_red())
+    embed.add_field(name="Membro", value=membro.mention, inline=False)
+    embed.add_field(name="Progresso", value=progresso_meta_texto(farm_membro), inline=False)
+    embed.add_field(name="Total entregue", value=str(total_farm_usuario(uid, semana)), inline=True)
+    embed.add_field(name="Situação", value="✅ Todas as metas batidas" if bateu_todas_metas(farm_membro) else "⚠️ Meta pendente", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="metasfarm", description="Mostra as metas semanais de farm")
+async def metasfarm(interaction: discord.Interaction):
+    garantir_estrutura_farm()
+    metas = data["metas_farm"]
+
+    embed = embed_base("🎯 Metas semanais de farm", "Metas mínimas por membro na semana.", discord.Color.gold())
+    embed.add_field(name="FIVE", value=f"{metas.get('five', 500)} unidades", inline=True)
+    embed.add_field(name="AK-47", value=f"{metas.get('ak47', 500)} unidades", inline=True)
+    embed.add_field(name="OUTROS", value=f"{metas.get('outros', 500)} unidades", inline=True)
+    embed.add_field(name="Semana atual", value=semana_atual(), inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="setmeta", description="Altera a meta semanal de uma munição")
+async def setmeta(interaction: discord.Interaction, municao: str, quantidade: int):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    if quantidade < 0:
+        await interaction.response.send_message("❌ Quantidade inválida.", ephemeral=True)
+        return
+
+    chave, nome = normalizar_municao(municao)
+    if not chave:
+        await interaction.response.send_message("❌ Munição inválida. Use: `five`, `ak47` ou `outros`.", ephemeral=True)
+        return
+
+    garantir_estrutura_farm()
+    antiga = data["metas_farm"].get(chave, METAS_PADRAO[chave])
+    data["metas_farm"][chave] = quantidade
+    salvar()
+
+    await enviar_log(
+        interaction.guild,
+        "🎯 Meta semanal alterada",
+        f"**Munição:** {nome}\n**Meta antiga:** {antiga}\n**Nova meta:** {quantidade}\n**Por:** {interaction.user.mention}",
+        discord.Color.gold()
+    )
+
+    embed = embed_base("✅ Meta atualizada", color=discord.Color.green())
+    embed.add_field(name="Munição", value=nome, inline=True)
+    embed.add_field(name="Meta antiga", value=str(antiga), inline=True)
+    embed.add_field(name="Nova meta", value=str(quantidade), inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="resetfarmsemana", description="Zera os farms da semana atual. Apenas autorizados")
+async def resetfarmsemana(interaction: discord.Interaction):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    garantir_estrutura_farm()
+    semana = semana_atual()
+    data["farms_semanais"][semana] = {}
+    salvar()
+
+    await enviar_log(
+        interaction.guild,
+        "♻️ Farm semanal resetado",
+        f"**Semana:** {semana}\n**Por:** {interaction.user.mention}",
+        discord.Color.orange()
+    )
+
+    embed = embed_base("♻️ Farm semanal resetado", f"Os farms da semana **{semana}** foram zerados.", discord.Color.orange())
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="ranking", description="Mostra ranking semanal de farms por munições")
+async def ranking(interaction: discord.Interaction):
+    garantir_estrutura_farm()
+    semana = semana_atual()
+    farms_semana = data.get("farms_semanais", {}).get(semana, {})
+
+    if not farms_semana:
+        await interaction.response.send_message("Ainda não há farms registrados nesta semana.", ephemeral=True)
+        return
+
+    top = sorted(farms_semana.items(), key=lambda item: sum(item[1].values()), reverse=True)[:10]
+    texto = ""
+    for pos, (uid, farm_membro) in enumerate(top, start=1):
+        total = sum(farm_membro.values())
+        texto += (
+            f"**{pos}.** <@{uid}> - **{total}** unidades "
+            f"• FIVE: {farm_membro.get('five', 0)} "
+            f"• AK-47: {farm_membro.get('ak47', 0)} "
+            f"• OUTROS: {farm_membro.get('outros', 0)}\n"
+        )
+
+    embed = embed_base("🏆 Ranking semanal de Farm", texto, discord.Color.gold())
+    embed.add_field(name="Semana", value=semana, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="pendentesfarm", description="Mostra membros registrados que ainda não bateram a meta semanal")
+async def pendentesfarm(interaction: discord.Interaction):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    garantir_estrutura_farm()
+    semana = semana_atual()
+    registros = data.get("registros", {})
+    pendentes = []
+
+    for uid, ficha in registros.items():
+        farm_membro = garantir_farm_usuario(uid, semana)
+        if not bateu_todas_metas(farm_membro):
+            nome = ficha.get("nome", f"<@{uid}>")
+            pendentes.append(f"<@{uid}> • **{nome}**\n{progresso_meta_texto(farm_membro)}")
+
+    salvar()
+
+    if not pendentes:
+        await interaction.response.send_message("✅ Todos os membros registrados bateram as metas da semana.")
+        return
+
+    texto = "\n\n".join(pendentes[:10])
+    embed = embed_base("⚠️ Pendentes de farm semanal", texto, discord.Color.orange())
+    embed.add_field(name="Semana", value=semana, inline=False)
+
+    if len(pendentes) > 10:
+        embed.add_field(name="Aviso", value=f"Mostrando 10 de {len(pendentes)} pendentes.", inline=False)
+
     await interaction.response.send_message(embed=embed)
 
 
@@ -376,22 +665,6 @@ async def removercaixa(interaction: discord.Interaction, valor: int):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="ranking", description="Mostra ranking de farms")
-async def ranking(interaction: discord.Interaction):
-    farms = data.get("farms", {})
-    if not farms:
-        await interaction.response.send_message("Ainda não há farms registrados.", ephemeral=True)
-        return
-
-    top = sorted(farms.items(), key=lambda item: item[1], reverse=True)[:10]
-    texto = ""
-    for pos, (uid, total) in enumerate(top, start=1):
-        texto += f"**{pos}.** <@{uid}> - **{total}** farms\n"
-
-    embed = embed_base("🏆 Ranking de Farm", texto, discord.Color.gold())
-    await interaction.response.send_message(embed=embed)
-
-
 # =========================
 # REGISTRO / CARGOS / MEMBRO
 # =========================
@@ -456,14 +729,14 @@ async def membro(interaction: discord.Interaction, membro: discord.Member):
 
     advs = data["advertencias"].get(uid, [])
     saldo_membro = data["saldos"].get(uid, 0)
-    farms_membro = data["farms"].get(uid, 0)
+    farms_membro = total_farm_usuario(uid, semana_atual())
 
     embed = embed_base(f"📄 Ficha de {nome_ficha}", color=discord.Color.dark_red())
     embed.add_field(name="Discord", value=membro.mention, inline=False)
     embed.add_field(name="Status", value="Registrado" if dados else "Cargo Membro detectado", inline=False)
     embed.add_field(name="Cargo interno", value=cargo_interno, inline=True)
     embed.add_field(name="Saldo", value=f"R$ {saldo_membro}", inline=True)
-    embed.add_field(name="Farms", value=str(farms_membro), inline=True)
+    embed.add_field(name="Farm semanal", value=f"{farms_membro} munições", inline=True)
     embed.add_field(name="Advertências", value=str(len(advs)), inline=True)
 
     if advs:
@@ -483,6 +756,8 @@ async def remover(interaction: discord.Interaction, membro: discord.Member):
     data["advertencias"].pop(uid, None)
     data["saldos"].pop(uid, None)
     data["farms"].pop(uid, None)
+    for semana in data.get("farms_semanais", {}).values():
+        semana.pop(uid, None)
     salvar()
     await enviar_log(interaction.guild, "❌ Membro removido", f"**Membro:** {membro.mention}\n**Por:** {interaction.user.mention}", discord.Color.red())
     embed = embed_base("❌ Membro removido", f"{membro.mention} foi removido do sistema da facção.", discord.Color.red())
@@ -723,6 +998,9 @@ class RecrutamentoModal(discord.ui.Modal, title="Recrutamento Croácia"):
             data.setdefault("blacklist", [])
             data.setdefault("caixa", 0)
             data.setdefault("recrutamentos", {})
+            data.setdefault("metas_farm", {"five": 500, "ak47": 500, "outros": 500})
+            data.setdefault("farms_semanais", {})
+            data.setdefault("historico_farms", [])
 
             # Salva o membro no sistema principal.
             data["registros"][uid] = {
