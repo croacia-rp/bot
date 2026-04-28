@@ -80,6 +80,7 @@ data.setdefault("advertencias", {})
 data.setdefault("blacklist", [])
 data.setdefault("caixa", 0)
 data.setdefault("recrutamentos", {})
+data.setdefault("indicacoes", {})
 data.setdefault("metas_farm", {"five": 500, "ak47": 500, "outros": 500})
 data.setdefault("farms_semanais", {})
 data.setdefault("historico_farms", [])
@@ -1139,6 +1140,158 @@ async def verrecrutamento(interaction: discord.Interaction, membro: discord.Memb
 
     await interaction.response.send_message(embed=embed)
 
+
+
+# =========================
+# SISTEMA DE INDICAÇÃO
+# =========================
+
+@bot.tree.command(name="indicado", description="Informa quem indicou você e oculta o canal de indicação")
+async def indicado(interaction: discord.Interaction, indicado_por: discord.Member):
+    if indicado_por.id == interaction.user.id:
+        await interaction.response.send_message("❌ Você não pode indicar você mesmo.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    uid = str(interaction.user.id)
+    data.setdefault("indicacoes", {})
+
+    if uid in data["indicacoes"]:
+        antigo_id = data["indicacoes"][uid].get("indicado_por_id")
+        await interaction.followup.send(
+            f"❌ Sua indicação já foi registrada anteriormente por <@{antigo_id}>.",
+            ephemeral=True
+        )
+        return
+
+    data["indicacoes"][uid] = {
+        "membro_id": interaction.user.id,
+        "membro": str(interaction.user),
+        "indicado_por_id": indicado_por.id,
+        "indicado_por": str(indicado_por),
+        "canal_id": interaction.channel.id,
+        "canal": str(interaction.channel),
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    salvar()
+
+    await enviar_log(
+        interaction.guild,
+        "🤝 Indicação registrada",
+        f"**Membro:** {interaction.user.mention}\n"
+        f"**Indicado por:** {indicado_por.mention}\n"
+        f"**Canal:** {interaction.channel.mention}\n"
+        f"**Ação:** canal de indicação ocultado para o membro.",
+        discord.Color.green()
+    )
+
+    await interaction.followup.send(
+        f"✅ Indicação registrada! Você informou que foi indicado por {indicado_por.mention}.\n"
+        "🔒 Este canal será ocultado para você agora.",
+        ephemeral=True
+    )
+
+    try:
+        await interaction.channel.set_permissions(
+            interaction.user,
+            view_channel=False,
+            reason="Indicação registrada automaticamente"
+        )
+    except discord.Forbidden:
+        await enviar_log(
+            interaction.guild,
+            "⚠️ Falha ao ocultar canal de indicação",
+            f"**Membro:** {interaction.user.mention}\n"
+            f"**Canal:** {interaction.channel.mention}\n"
+            "**Erro:** o bot não tem permissão para gerenciar permissões do canal.",
+            discord.Color.orange()
+        )
+    except discord.HTTPException:
+        await enviar_log(
+            interaction.guild,
+            "⚠️ Falha ao ocultar canal de indicação",
+            f"**Membro:** {interaction.user.mention}\n"
+            f"**Canal:** {interaction.channel.mention}\n"
+            "**Erro:** o Discord recusou a alteração de permissão.",
+            discord.Color.orange()
+        )
+
+
+@bot.tree.command(name="verindicacao", description="Mostra quem indicou um membro")
+async def verindicacao(interaction: discord.Interaction, membro: discord.Member):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    uid = str(membro.id)
+    ficha = data.get("indicacoes", {}).get(uid)
+
+    if not ficha:
+        await interaction.response.send_message("❌ Esse membro ainda não registrou indicação.", ephemeral=True)
+        return
+
+    embed = embed_base("🤝 Ficha de Indicação", color=discord.Color.dark_red())
+    embed.add_field(name="Membro", value=membro.mention, inline=False)
+    embed.add_field(name="Indicado por", value=f"<@{ficha.get('indicado_por_id')}>", inline=False)
+    embed.add_field(name="Canal", value=f"<#{ficha.get('canal_id')}>", inline=True)
+    embed.add_field(name="Data", value=ficha.get("data", "Não informado"), inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="liberarindicacao", description="Libera novamente o canal atual de indicação para um membro")
+async def liberarindicacao(interaction: discord.Interaction, membro: discord.Member):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    try:
+        await interaction.channel.set_permissions(
+            membro,
+            overwrite=None,
+            reason=f"Canal de indicação liberado por {interaction.user}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Não tenho permissão para alterar permissões deste canal.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("❌ O Discord recusou a alteração de permissão.", ephemeral=True)
+        return
+
+    await enviar_log(
+        interaction.guild,
+        "🔓 Canal de indicação liberado",
+        f"**Membro:** {membro.mention}\n**Canal:** {interaction.channel.mention}\n**Por:** {interaction.user.mention}",
+        discord.Color.gold()
+    )
+
+    await interaction.response.send_message(f"✅ {membro.mention} voltou a ter a permissão normal deste canal.", ephemeral=True)
+
+
+@bot.tree.command(name="resetindicacao", description="Apaga o registro de indicação de um membro")
+async def resetindicacao(interaction: discord.Interaction, membro: discord.Member):
+    if not tem_permissao(interaction.user):
+        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return
+
+    uid = str(membro.id)
+    data.setdefault("indicacoes", {})
+
+    if uid not in data["indicacoes"]:
+        await interaction.response.send_message("❌ Esse membro não tem indicação registrada.", ephemeral=True)
+        return
+
+    data["indicacoes"].pop(uid, None)
+    salvar()
+
+    await enviar_log(
+        interaction.guild,
+        "♻️ Indicação resetada",
+        f"**Membro:** {membro.mention}\n**Por:** {interaction.user.mention}",
+        discord.Color.orange()
+    )
+
+    await interaction.response.send_message(f"✅ Indicação de {membro.mention} foi resetada.", ephemeral=True)
 
 
 # =========================
