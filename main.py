@@ -15,6 +15,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = 1442149654971027488
 LOG_CHANNEL_ID = 1442149655361093745
 RECRUTAMENTO_CHANNEL_ID = 1491457861732274248
+INDICACAO_CHANNEL_ID = 1498645764836954182
 
 CARGO_ADV_ID = 1442149654971027490
 CARGO_MEMBROS_ID = 1442149655340388458
@@ -1216,13 +1217,21 @@ async def indicado(interaction: discord.Interaction, indicado_por: discord.Membe
         )
         return
 
+    canal_indicacao = interaction.guild.get_channel(INDICACAO_CHANNEL_ID)
+    if not canal_indicacao:
+        await interaction.followup.send(
+            "❌ Canal de indicação não encontrado. Confira o ID configurado no bot.",
+            ephemeral=True
+        )
+        return
+
     data["indicacoes"][uid] = {
         "membro_id": interaction.user.id,
         "membro": str(interaction.user),
         "indicado_por_id": indicado_por.id,
         "indicado_por": str(indicado_por),
-        "canal_id": interaction.channel.id,
-        "canal": str(interaction.channel),
+        "canal_id": INDICACAO_CHANNEL_ID,
+        "canal": str(canal_indicacao),
         "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     salvar()
@@ -1232,19 +1241,19 @@ async def indicado(interaction: discord.Interaction, indicado_por: discord.Membe
         "🤝 Indicação registrada",
         f"**Membro:** {interaction.user.mention}\n"
         f"**Indicado por:** {indicado_por.mention}\n"
-        f"**Canal:** {interaction.channel.mention}\n"
+        f"**Canal ocultado:** {canal_indicacao.mention}\n"
         f"**Ação:** canal de indicação ocultado para o membro.",
         discord.Color.green()
     )
 
     await interaction.followup.send(
         f"✅ Indicação registrada! Você informou que foi indicado por {indicado_por.mention}.\n"
-        "🔒 Este canal será ocultado para você agora.",
+        f"🔒 O canal {canal_indicacao.mention} será ocultado para você agora.",
         ephemeral=True
     )
 
     try:
-        await interaction.channel.set_permissions(
+        await canal_indicacao.set_permissions(
             interaction.user,
             view_channel=False,
             reason="Indicação registrada automaticamente"
@@ -1254,7 +1263,7 @@ async def indicado(interaction: discord.Interaction, indicado_por: discord.Membe
             interaction.guild,
             "⚠️ Falha ao ocultar canal de indicação",
             f"**Membro:** {interaction.user.mention}\n"
-            f"**Canal:** {interaction.channel.mention}\n"
+            f"**Canal:** {canal_indicacao.mention}\n"
             "**Erro:** o bot não tem permissão para gerenciar permissões do canal.",
             discord.Color.orange()
         )
@@ -1263,7 +1272,7 @@ async def indicado(interaction: discord.Interaction, indicado_por: discord.Membe
             interaction.guild,
             "⚠️ Falha ao ocultar canal de indicação",
             f"**Membro:** {interaction.user.mention}\n"
-            f"**Canal:** {interaction.channel.mention}\n"
+            f"**Canal:** {canal_indicacao.mention}\n"
             "**Erro:** o Discord recusou a alteração de permissão.",
             discord.Color.orange()
         )
@@ -1290,14 +1299,19 @@ async def verindicacao(interaction: discord.Interaction, membro: discord.Member)
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="liberarindicacao", description="Libera novamente o canal atual de indicação para um membro")
+@bot.tree.command(name="liberarindicacao", description="Libera novamente o canal de indicação para um membro")
 async def liberarindicacao(interaction: discord.Interaction, membro: discord.Member):
     if not tem_permissao(interaction.user):
         await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         return
 
+    canal_indicacao = interaction.guild.get_channel(INDICACAO_CHANNEL_ID)
+    if not canal_indicacao:
+        await interaction.response.send_message("❌ Canal de indicação não encontrado. Confira o ID configurado no bot.", ephemeral=True)
+        return
+
     try:
-        await interaction.channel.set_permissions(
+        await canal_indicacao.set_permissions(
             membro,
             overwrite=None,
             reason=f"Canal de indicação liberado por {interaction.user}"
@@ -1312,11 +1326,11 @@ async def liberarindicacao(interaction: discord.Interaction, membro: discord.Mem
     await enviar_log(
         interaction.guild,
         "🔓 Canal de indicação liberado",
-        f"**Membro:** {membro.mention}\n**Canal:** {interaction.channel.mention}\n**Por:** {interaction.user.mention}",
+        f"**Membro:** {membro.mention}\n**Canal:** {canal_indicacao.mention}\n**Por:** {interaction.user.mention}",
         discord.Color.gold()
     )
 
-    await interaction.response.send_message(f"✅ {membro.mention} voltou a ter a permissão normal deste canal.", ephemeral=True)
+    await interaction.response.send_message(f"✅ {membro.mention} voltou a ter a permissão normal em {canal_indicacao.mention}.", ephemeral=True)
 
 
 @bot.tree.command(name="resetindicacao", description="Apaga o registro de indicação de um membro")
