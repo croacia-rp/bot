@@ -18,6 +18,7 @@ LOG_CHANNEL_ID = 1442149655361093745
 RECRUTAMENTO_CHANNEL_ID = 1491457861732274248
 INDICACAO_CHANNEL_ID = 1498645764836954182
 AVISOS_FARM_CHANNEL_ID = 1498662912594804867
+PAINEL_LOGO_PATH = "logo_croacia.png"
 TIMEZONE_BOT = ZoneInfo("America/Sao_Paulo")
 
 CARGO_ADV_ID = 1442149654971027490
@@ -92,6 +93,7 @@ data.setdefault("farms_semanais", {})
 data.setdefault("historico_farms", [])
 data.setdefault("historico_resets_farm", [])
 data.setdefault("ultimo_reset_farm", None)
+data.setdefault("farmadores_removidos", {})
 
 
 def salvar():
@@ -166,6 +168,7 @@ async def aplicar_apelido_membro(membro: discord.Member, nome: str, motivo: str)
 async def on_ready():
     guild = discord.Object(id=GUILD_ID)
     try:
+        bot.add_view(PainelTDCView())
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
         print(f"🇭🇷 {NOME_FACCAO} online como {bot.user}")
@@ -416,6 +419,24 @@ def membros_registrados_ids() -> list[str]:
     return [str(uid) for uid in registros.keys()]
 
 
+def garantir_lista_farmadores():
+    data.setdefault("farmadores_removidos", {})
+
+
+def farmador_ativo(uid: str) -> bool:
+    garantir_lista_farmadores()
+    return str(uid) not in data.get("farmadores_removidos", {})
+
+
+def farmadores_ativos_ids() -> list[str]:
+    return [uid for uid in membros_registrados_ids() if farmador_ativo(uid)]
+
+
+def nome_ficha_usuario(uid: str) -> str:
+    ficha = data.get("registros", {}).get(str(uid), {})
+    return ficha.get("nome", f"<@{uid}>")
+
+
 def resumo_farms_semana(semana: str | None = None):
     garantir_estrutura_farm()
     semana = nome_semana(semana)
@@ -429,6 +450,9 @@ def resumo_farms_semana(semana: str | None = None):
     total_outros = 0
 
     for uid, ficha in registros.items():
+        if not farmador_ativo(uid):
+            continue
+
         farm_membro = farms_semana.get(uid, {"five": 0, "ak47": 0, "outros": 0})
         for chave in METAS_PADRAO:
             farm_membro.setdefault(chave, 0)
@@ -467,7 +491,7 @@ def resumo_farms_semana(semana: str | None = None):
         "total_ak47": total_ak47,
         "total_outros": total_outros,
         "total_geral": total_five + total_ak47 + total_outros,
-        "total_membros": len(registros)
+        "total_membros": len(farmadores_ativos_ids())
     }
 
 
@@ -837,6 +861,9 @@ async def pendentesfarm(interaction: discord.Interaction):
         pendentes = []
 
         for uid, ficha in registros.items():
+            if not farmador_ativo(uid):
+                continue
+
             farm_membro = garantir_farm_usuario(uid, semana)
             if not bateu_todas_metas(farm_membro):
                 nome = ficha.get("nome", f"<@{uid}>")
@@ -861,83 +888,299 @@ async def pendentesfarm(interaction: discord.Interaction):
         print(f"ERRO NO COMANDO /pendentesfarm: {repr(erro)}")
         await interaction.followup.send("❌ Deu erro ao listar pendentes.", ephemeral=True)
 
-@bot.tree.command(name="painel", description="Mostra um painel bonito com o resumo geral da facção")
-async def painel(interaction: discord.Interaction):
+
+@bot.tree.command(name="removerfarmador", description="Remove um membro da lista de cobrança de farm")
+async def removerfarmador(interaction: discord.Interaction, membro: discord.Member, motivo: str = "Não farma mais"):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not tem_permissao(interaction.user):
+            await interaction.followup.send("❌ Sem permissão.", ephemeral=True)
+            return
+
+        garantir_lista_farmadores()
+        uid = str(membro.id)
+        data["farmadores_removidos"][uid] = {
+            "motivo": motivo,
+            "removido_por_id": interaction.user.id,
+            "removido_por": str(interaction.user),
+            "data": agora_brasil().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        salvar()
+
+        await enviar_log(
+            interaction.guild,
+            "🚫 Membro removido da lista de farmadores",
+            f"**Membro:** {membro.mention}\n**Motivo:** {motivo}\n**Por:** {interaction.user.mention}",
+            discord.Color.red()
+        )
+
+        await interaction.followup.send(
+            f"✅ {membro.mention} foi removido da lista de cobrança de farm. Ele não vai cair como pendente no reset semanal.",
+            ephemeral=True
+        )
+
+    except Exception as erro:
+        print(f"ERRO NO COMANDO /removerfarmador: {repr(erro)}")
+        await interaction.followup.send("❌ Deu erro ao remover esse membro da lista de farmadores.", ephemeral=True)
+
+
+@bot.tree.command(name="addfarmador", description="Adiciona um membro novamente na lista de cobrança de farm")
+async def addfarmador(interaction: discord.Interaction, membro: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not tem_permissao(interaction.user):
+            await interaction.followup.send("❌ Sem permissão.", ephemeral=True)
+            return
+
+        garantir_lista_farmadores()
+        uid = str(membro.id)
+        estava_removido = uid in data["farmadores_removidos"]
+        data["farmadores_removidos"].pop(uid, None)
+        salvar()
+
+        await enviar_log(
+            interaction.guild,
+            "✅ Membro adicionado na lista de farmadores",
+            f"**Membro:** {membro.mention}\n**Por:** {interaction.user.mention}",
+            discord.Color.green()
+        )
+
+        if estava_removido:
+            await interaction.followup.send(f"✅ {membro.mention} voltou para a lista de farmadores ativos.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"ℹ️ {membro.mention} já estava na lista de farmadores ativos.", ephemeral=True)
+
+    except Exception as erro:
+        print(f"ERRO NO COMANDO /addfarmador: {repr(erro)}")
+        await interaction.followup.send("❌ Deu erro ao adicionar esse membro na lista de farmadores.", ephemeral=True)
+
+
+@bot.tree.command(name="listafarmadores", description="Mostra farmadores ativos e removidos da cobrança")
+async def listafarmadores(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not tem_permissao(interaction.user):
+            await interaction.followup.send("❌ Sem permissão.", ephemeral=True)
+            return
+
+        garantir_lista_farmadores()
+        ativos = farmadores_ativos_ids()
+        removidos = data.get("farmadores_removidos", {})
+
+        ativos_txt = "\n".join([f"• <@{uid}> • **{nome_ficha_usuario(uid)}**" for uid in ativos[:20]]) or "Nenhum farmador ativo."
+        removidos_linhas = []
+        for uid, info in list(removidos.items())[:20]:
+            removidos_linhas.append(f"• <@{uid}> • **{nome_ficha_usuario(uid)}**\nMotivo: {info.get('motivo', 'Não informado')}")
+        removidos_txt = "\n\n".join(removidos_linhas) or "Nenhum membro removido."
+
+        embed = embed_base("📋 Lista de Farmadores", "Controle de quem entra na cobrança semanal de metas.", discord.Color.dark_red())
+        embed.add_field(name=f"✅ Ativos ({len(ativos)})", value=ativos_txt, inline=False)
+        embed.add_field(name=f"🚫 Removidos ({len(removidos)})", value=removidos_txt, inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as erro:
+        print(f"ERRO NO COMANDO /listafarmadores: {repr(erro)}")
+        await interaction.followup.send("❌ Deu erro ao mostrar a lista de farmadores.", ephemeral=True)
+
+
+def criar_embed_paineltdc() -> discord.Embed:
+    garantir_estrutura_farm()
+    garantir_lista_farmadores()
+    semana = semana_atual()
+    resumo = resumo_farms_semana(semana)
+    metas = data.get("metas_farm", METAS_PADRAO)
+    caixa_total = data.get("caixa", 0)
+    registros = data.get("registros", {})
+    indicacoes = data.get("indicacoes", {})
+    removidos = data.get("farmadores_removidos", {})
+
+    top_texto = "Ainda sem entregas nessa semana."
+    if resumo["top"]:
+        linhas_top = []
+        for pos, item in enumerate(resumo["top"][:5], start=1):
+            farm = item["farm"]
+            linhas_top.append(
+                f"**{pos}.** <@{item['uid']}> • **{item['total']}** un.\n"
+                f"FIVE `{farm.get('five', 0)}` • AK-47 `{farm.get('ak47', 0)}` • OUTROS `{farm.get('outros', 0)}`"
+            )
+        top_texto = "\n".join(linhas_top)
+
+    porcentagem = 0
+    if resumo["total_membros"] > 0:
+        porcentagem = round((len(resumo["aprovados"]) / resumo["total_membros"]) * 100)
+
+    barra_cheia = max(0, min(10, porcentagem // 10))
+    barra = "🟥" * barra_cheia + "⬛" * (10 - barra_cheia)
+
+    embed = discord.Embed(
+        title="🇭🇷 CROÁCIA RP • PAINEL TDC",
+        description=(
+            "```ansi\n"
+            "\u001b[31m██ CENTRAL DE COMANDO ██\u001b[0m\n"
+            "```\n"
+            "🩸 **Controle operacional da facção**\n"
+            "Use os botões abaixo para consultar farms, metas, ficha, regras e situação geral."
+        ),
+        color=discord.Color.dark_red()
+    )
+
+    embed.add_field(name="📆 Semana", value=f"`{semana}`", inline=True)
+    embed.add_field(name="💰 Caixa", value=f"`R$ {caixa_total}`", inline=True)
+    embed.add_field(name="👥 Farmadores ativos", value=f"`{resumo['total_membros']}`", inline=True)
+
+    embed.add_field(
+        name="🎯 Metas obrigatórias",
+        value=(
+            f"🔫 FIVE: `{metas.get('five', 500)}`\n"
+            f"⚔️ AK-47: `{metas.get('ak47', 500)}`\n"
+            f"📦 OUTROS: `{metas.get('outros', 500)}`"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="📦 Entregas da semana",
+        value=(
+            f"FIVE: `{resumo['total_five']}`\n"
+            f"AK-47: `{resumo['total_ak47']}`\n"
+            f"OUTROS: `{resumo['total_outros']}`\n"
+            f"Total: **{resumo['total_geral']}**"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="📊 Status da tropa",
+        value=(
+            f"✅ Bateram: **{len(resumo['aprovados'])}**\n"
+            f"⚠️ Pendentes: **{len(resumo['pendentes'])}**\n"
+            f"🚫 Fora da lista: **{len(removidos)}**\n"
+            f"🔥 Conclusão: **{porcentagem}%**\n{barra}"
+        ),
+        inline=True
+    )
+    embed.add_field(name="🏆 Top farms", value=top_texto, inline=False)
+    embed.add_field(name="🤝 Indicações", value=f"`{len(indicacoes)}` registradas", inline=True)
+    embed.add_field(name="♻️ Reset automático", value=f"Segunda às `00:00`\nCanal: <#{AVISOS_FARM_CHANNEL_ID}>", inline=True)
+    embed.add_field(name="🧭 Botões", value="📦 Meu Farm • 🎯 Metas • 🏆 Ranking • ⚠️ Pendentes • 📜 Regras • 📻 Rádio • 👑 Chefes • 🧾 Minha ficha", inline=False)
+    embed.set_footer(text=f"{NOME_FACCAO} RP • Painel TDC Oficial")
+
+    if os.path.exists(PAINEL_LOGO_PATH):
+        embed.set_image(url=f"attachment://{PAINEL_LOGO_PATH}")
+
+    return embed
+
+
+class PainelTDCView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Meu Farm", style=discord.ButtonStyle.danger, emoji="📦", row=0, custom_id="tdc_painel_meufarm")
+    async def botao_meufarm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        uid = str(interaction.user.id)
+        farm_membro = garantir_farm_usuario(uid, semana_atual())
+        embed = embed_base("📦 Seu farm semanal", f"Semana: **{semana_atual()}**", discord.Color.dark_red())
+        embed.add_field(name="Progresso", value=progresso_meta_texto(farm_membro), inline=False)
+        embed.add_field(name="Total", value=str(total_farm_usuario(uid, semana_atual())), inline=True)
+        embed.add_field(name="Situação", value="✅ Todas as metas batidas" if bateu_todas_metas(farm_membro) else "⚠️ Meta pendente", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Metas", style=discord.ButtonStyle.secondary, emoji="🎯", row=0, custom_id="tdc_painel_metas")
+    async def botao_metas(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        metas = data.get("metas_farm", METAS_PADRAO)
+        embed = embed_base("🎯 Metas semanais", "Mínimo obrigatório por farmador ativo.", discord.Color.gold())
+        embed.add_field(name="FIVE", value=f"{metas.get('five', 500)} unidades", inline=True)
+        embed.add_field(name="AK-47", value=f"{metas.get('ak47', 500)} unidades", inline=True)
+        embed.add_field(name="OUTROS", value=f"{metas.get('outros', 500)} unidades", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Ranking", style=discord.ButtonStyle.success, emoji="🏆", row=0, custom_id="tdc_painel_ranking")
+    async def botao_ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        resumo = resumo_farms_semana(semana_atual())
+        texto = "Ainda sem farms nessa semana."
+        if resumo["top"]:
+            linhas = []
+            for pos, item in enumerate(resumo["top"][:10], start=1):
+                linhas.append(f"**{pos}.** <@{item['uid']}> • **{item['total']}** unidades")
+            texto = "\n".join(linhas)
+        embed = embed_base("🏆 Ranking de Farm", texto, discord.Color.gold())
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Pendentes", style=discord.ButtonStyle.danger, emoji="⚠️", row=1, custom_id="tdc_painel_pendentes")
+    async def botao_pendentes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        if not tem_permissao(interaction.user):
+            await interaction.followup.send("❌ Sem permissão.", ephemeral=True)
+            return
+        resumo = resumo_farms_semana(semana_atual())
+        embed = embed_base("⚠️ Pendentes da semana", lista_resumo_membros(resumo["pendentes"], limite=15), discord.Color.orange())
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Atualizar Painel", style=discord.ButtonStyle.secondary, emoji="🔄", row=1, custom_id="tdc_painel_atualizar")
+    async def botao_atualizar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=False)
+        embed = criar_embed_paineltdc()
+        arquivo = discord.File(PAINEL_LOGO_PATH, filename=PAINEL_LOGO_PATH) if os.path.exists(PAINEL_LOGO_PATH) else None
+        if arquivo:
+            await interaction.followup.send(embed=embed, view=PainelTDCView(), file=arquivo)
+        else:
+            await interaction.followup.send(embed=embed, view=PainelTDCView())
+
+    @discord.ui.button(label="Regras", style=discord.ButtonStyle.secondary, emoji="📜", row=2, custom_id="tdc_painel_regras")
+    async def botao_regras(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = embed_base(f"📜 Regras da {NOME_FACCAO}", "Disciplina mantém a família de pé.", discord.Color.dark_red())
+        for i, regra in enumerate(REGRAS, start=1):
+            embed.add_field(name=f"Regra {i}", value=regra, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Rádio", style=discord.ButtonStyle.secondary, emoji="📻", row=2, custom_id="tdc_painel_radio")
+    async def botao_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = embed_base(f"📻 Rádio da {NOME_FACCAO}", f"A rádio oficial é **{RADIO_FAC}**.", discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Chefes", style=discord.ButtonStyle.secondary, emoji="👑", row=2, custom_id="tdc_painel_chefes")
+    async def botao_chefes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = embed_base(f"👑 Chefes da {NOME_FACCAO}", "Hierarquia principal da facção.", discord.Color.gold())
+        for codigo, dados_chefe in CHEFES.items():
+            embed.add_field(name=f"Chefe {codigo} - {dados_chefe['nome']}", value=dados_chefe["funcao"], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Minha Ficha", style=discord.ButtonStyle.secondary, emoji="🧾", row=3, custom_id="tdc_painel_ficha")
+    async def botao_ficha(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+        dados = data.get("registros", {}).get(uid)
+        if not dados:
+            await interaction.response.send_message("❌ Você ainda não está registrado no sistema.", ephemeral=True)
+            return
+        advs = data.get("advertencias", {}).get(uid, [])
+        embed = embed_base(f"🧾 Ficha de {dados.get('nome', interaction.user.display_name)}", color=discord.Color.dark_red())
+        embed.add_field(name="Discord", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Cargo interno", value=dados.get("cargo", "Membro"), inline=True)
+        embed.add_field(name="Saldo", value=f"R$ {data.get('saldos', {}).get(uid, 0)}", inline=True)
+        embed.add_field(name="Farmador ativo", value="✅ Sim" if farmador_ativo(uid) else "🚫 Não", inline=True)
+        embed.add_field(name="Advertências", value=str(len(advs)), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="paineltdc", description="Painel interativo bonito da facção")
+async def paineltdc(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
 
     try:
-        garantir_estrutura_farm()
-        semana = semana_atual()
-        resumo = resumo_farms_semana(semana)
-        metas = data.get("metas_farm", METAS_PADRAO)
-        caixa_total = data.get("caixa", 0)
-        registros = data.get("registros", {})
-        indicacoes = data.get("indicacoes", {})
+        embed = criar_embed_paineltdc()
+        arquivo = discord.File(PAINEL_LOGO_PATH, filename=PAINEL_LOGO_PATH) if os.path.exists(PAINEL_LOGO_PATH) else None
 
-        top_texto = "Ainda sem entregas nessa semana."
-        if resumo["top"]:
-            linhas_top = []
-            for pos, item in enumerate(resumo["top"][:5], start=1):
-                farm = item["farm"]
-                linhas_top.append(
-                    f"**{pos}.** <@{item['uid']}> • **{item['total']}** un. "
-                    f"｜ FIVE {farm.get('five', 0)} • AK-47 {farm.get('ak47', 0)} • OUTROS {farm.get('outros', 0)}"
-                )
-            top_texto = "\n".join(linhas_top)
-
-        porcentagem = 0
-        if resumo["total_membros"] > 0:
-            porcentagem = round((len(resumo["aprovados"]) / resumo["total_membros"]) * 100)
-
-        barra_cheia = max(0, min(10, porcentagem // 10))
-        barra = "🟥" * barra_cheia + "⬛" * (10 - barra_cheia)
-
-        embed = embed_base(
-            "🇭🇷 Painel Geral da Croácia",
-            "**Central de comando da facção**\nResumo vivo de caixa, farms, metas e desempenho semanal.",
-            discord.Color.dark_red()
-        )
-        embed.add_field(name="📆 Semana", value=semana, inline=True)
-        embed.add_field(name="💰 Caixa", value=f"R$ {caixa_total}", inline=True)
-        embed.add_field(name="👥 Membros registrados", value=str(len(registros)), inline=True)
-
-        embed.add_field(
-            name="🎯 Metas semanais",
-            value=(
-                f"**FIVE:** {metas.get('five', 500)}\n"
-                f"**AK-47:** {metas.get('ak47', 500)}\n"
-                f"**OUTROS:** {metas.get('outros', 500)}"
-            ),
-            inline=True
-        )
-        embed.add_field(
-            name="📦 Entregas da semana",
-            value=(
-                f"**FIVE:** {resumo['total_five']}\n"
-                f"**AK-47:** {resumo['total_ak47']}\n"
-                f"**OUTROS:** {resumo['total_outros']}\n"
-                f"**Total:** {resumo['total_geral']}"
-            ),
-            inline=True
-        )
-        embed.add_field(
-            name="📊 Status das metas",
-            value=(
-                f"✅ Bateram: **{len(resumo['aprovados'])}**\n"
-                f"⚠️ Pendentes: **{len(resumo['pendentes'])}**\n"
-                f"🔥 Conclusão: **{porcentagem}%**\n{barra}"
-            ),
-            inline=True
-        )
-        embed.add_field(name="🏆 Top farms da semana", value=top_texto, inline=False)
-        embed.add_field(name="🤝 Indicações registradas", value=str(len(indicacoes)), inline=True)
-        embed.add_field(name="♻️ Reset automático", value=f"Segunda-feira às 00:00\nCanal: <#{AVISOS_FARM_CHANNEL_ID}>", inline=True)
-        embed.add_field(name="🧭 Comandos úteis", value="`/farm` • `/meufarm` • `/farmusuario` • `/metasfarm` • `/pendentesfarm` • `/ranking`", inline=False)
-
-        await interaction.followup.send(embed=embed)
+        if arquivo:
+            await interaction.followup.send(embed=embed, view=PainelTDCView(), file=arquivo)
+        else:
+            await interaction.followup.send(embed=embed, view=PainelTDCView())
 
     except Exception as erro:
-        print(f"ERRO NO COMANDO /painel: {repr(erro)}")
+        print(f"ERRO NO COMANDO /paineltdc: {repr(erro)}")
         await interaction.followup.send("❌ Deu erro ao abrir o painel.", ephemeral=True)
 
 @bot.tree.command(name="saldo", description="Mostra seu saldo")
