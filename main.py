@@ -40,10 +40,12 @@ RADIO_FAC = "173"
 LOCAL_AREA_RISCO = "Número 4"
 COR_PADRAO = discord.Color.dark_red()
 
+FUNCAO_CHEFE_PADRAO = "Líder geral da facção, toma decisões e comanda operações."
+
 CHEFES = {
-    "00": {"nome": "Connor", "funcao": "Líder geral da facção, toma decisões e comanda operações."},
-    "01": {"nome": "Lincon", "funcao": "Sub-líder, organiza membros e coordena ações."},
-    "02": {"nome": "Mudo", "funcao": "Gerente, controla farm, disciplina e organização da equipe."}
+    "00": {"nome": "Connor", "funcao": FUNCAO_CHEFE_PADRAO},
+    "01": {"nome": "Lincon", "funcao": FUNCAO_CHEFE_PADRAO},
+    "02": {"nome": "Mudo", "funcao": FUNCAO_CHEFE_PADRAO}
 }
 
 REGRAS = [
@@ -161,6 +163,22 @@ async def on_ready():
         print(f"Comandos sincronizados: {len(synced)}")
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
+
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    print(f"ERRO EM COMANDO SLASH: {repr(error)}")
+
+    mensagem = "❌ Deu erro nesse comando. Veja o terminal do bot para detalhes."
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(mensagem, ephemeral=True)
+        else:
+            await interaction.response.send_message(mensagem, ephemeral=True)
+    except Exception:
+        pass
 
 
 # =========================
@@ -1280,25 +1298,52 @@ async def indicado(interaction: discord.Interaction, indicado_por: discord.Membe
 
 @bot.tree.command(name="verindicacao", description="Mostra quem indicou um membro")
 async def verindicacao(interaction: discord.Interaction, membro: discord.Member):
-    if not tem_permissao(interaction.user):
-        await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
 
-    uid = str(membro.id)
-    ficha = data.get("indicacoes", {}).get(uid)
+    try:
+        if not tem_permissao(interaction.user):
+            await interaction.followup.send("❌ Sem permissão.", ephemeral=True)
+            return
 
-    if not ficha:
-        await interaction.followup.send("❌ Esse membro ainda não registrou indicação.", ephemeral=True)
-        return
+        uid = str(membro.id)
+        data.setdefault("indicacoes", {})
+        ficha = data.get("indicacoes", {}).get(uid)
 
-    embed = embed_base("🤝 Ficha de Indicação", color=discord.Color.dark_red())
-    embed.add_field(name="Membro", value=membro.mention, inline=False)
-    embed.add_field(name="Indicado por", value=f"<@{ficha.get('indicado_por_id')}>", inline=False)
-    embed.add_field(name="Canal", value=f"<#{ficha.get('canal_id')}>", inline=True)
-    embed.add_field(name="Data", value=ficha.get("data", "Não informado"), inline=True)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+        if not ficha:
+            await interaction.followup.send("❌ Esse membro ainda não registrou indicação.", ephemeral=True)
+            return
+
+        if not isinstance(ficha, dict):
+            await interaction.followup.send(
+                "❌ A indicação desse membro está salva em formato antigo/incorreto. Use `/resetindicacao` e peça para registrar novamente.",
+                ephemeral=True
+            )
+            return
+
+        indicado_por_id = ficha.get("indicado_por_id")
+        canal_id = ficha.get("canal_id", INDICACAO_CHANNEL_ID)
+        data_registro = ficha.get("data", "Não informado")
+
+        indicado_por_texto = f"<@{indicado_por_id}>" if indicado_por_id else "Não informado"
+        canal_texto = f"<#{canal_id}>" if canal_id else "Não informado"
+
+        embed = embed_base("🤝 Ficha de Indicação", color=discord.Color.dark_red())
+        embed.add_field(name="Membro", value=membro.mention, inline=False)
+        embed.add_field(name="Indicado por", value=indicado_por_texto, inline=False)
+        embed.add_field(name="Canal", value=canal_texto, inline=True)
+        embed.add_field(name="Data", value=data_registro, inline=True)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as erro:
+        print(f"ERRO NO /verindicacao: {repr(erro)}")
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao consultar essa indicação. Veja o erro no terminal do bot.",
+                ephemeral=True
+            )
+        except Exception:
+            pass
 
 
 @bot.tree.command(name="liberarindicacao", description="Libera novamente o canal de indicação para um membro")
